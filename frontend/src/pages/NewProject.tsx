@@ -1,6 +1,19 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import proj4 from 'proj4';
 import { projectsApi, jobsApi, type GCPPoint, type ProcessingPreset, type ExifSummary } from '../api';
+
+// ─── Projection definitions (NM State Plane + common CRS) ────────────────────
+proj4.defs([
+  ['EPSG:6529', '+proj=tmerc +lat_0=31 +lon_0=-106.25 +k=0.9999 +x_0=500000.00001016 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs'],
+  ['EPSG:6528', '+proj=tmerc +lat_0=31 +lon_0=-104.333333333333 +k=0.9999 +x_0=165000.000003353 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs'],
+  ['EPSG:6530', '+proj=tmerc +lat_0=31 +lon_0=-108.333333333333 +k=0.9999 +x_0=830000.000016933 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs'],
+  ['EPSG:32654', '+proj=utm +zone=54 +datum=WGS84 +units=m +no_defs'],
+  ['EPSG:32610', '+proj=utm +zone=10 +datum=WGS84 +units=m +no_defs'],
+  ['EPSG:27700', '+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +datum=OSGB36 +units=m +no_defs'],
+  ['EPSG:3857', '+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs'],
+]);
+
 
 // ─── Preset Picker ────────────────────────────────────────────────────────────
 
@@ -297,23 +310,52 @@ function RtkConfigPanel({
 
 // ─── GCP Editor ──────────────────────────────────────────────────────────────
 
-function GCPEditor({ gcps, onChange }: { gcps: GCPPoint[]; onChange: (g: GCPPoint[]) => void }) {
+import GCPImagePicker from '../components/GCPImagePicker';
+import GcpAutoDetect from '../components/GcpAutoDetect';
+
+function GCPEditor({ gcps, onChange, projectId, onAutoDetect }: {
+  gcps: GCPPoint[];
+  onChange: (g: GCPPoint[]) => void;
+  projectId: string | null;
+  onAutoDetect?: () => void;
+}) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const [pickingFor, setPickingFor] = useState<number | null>(null);
 
   const addRow = () => {
-    onChange([...gcps, { label: `GCP${gcps.length + 1}`, x: 0, y: 0, z: 0 }]);
+    onChange([...gcps, { label: `GCP${gcps.length + 1}`, x: 0, y: 0, z: 0, observations: [] }]);
   };
 
-  const updateRow = (i: number, field: keyof GCPPoint, val: string) => {
+  const updateCoord = (i: number, field: 'label' | 'x' | 'y' | 'z', val: string) => {
     const updated = [...gcps];
-    (updated[i] as any)[field] = ['x', 'y', 'z', 'pixel_x', 'pixel_y'].includes(field as string)
-      ? parseFloat(val) || 0
-      : val;
+    (updated[i] as any)[field] = field === 'label' ? val : (parseFloat(val) || 0);
     onChange(updated);
   };
 
   const removeRow = (i: number) => {
     onChange(gcps.filter((_, idx) => idx !== i));
+  };
+
+  const removeObservation = (gcpIdx: number, obsIdx: number) => {
+    const updated = gcps.map((g, i) =>
+      i === gcpIdx
+        ? { ...g, observations: g.observations.filter((_, j) => j !== obsIdx) }
+        : g
+    );
+    onChange(updated);
+  };
+
+  // Called by GCPImagePicker — appends a new observation
+  const handlePickerSelect = (imageName: string, pixelX: number, pixelY: number) => {
+    if (pickingFor !== null) {
+      const updated = gcps.map((g, i) =>
+        i === pickingFor
+          ? { ...g, observations: [...g.observations, { image: imageName, pixel_x: pixelX, pixel_y: pixelY }] }
+          : g
+      );
+      onChange(updated);
+      setPickingFor(null);
+    }
   };
 
   const importCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -323,18 +365,29 @@ function GCPEditor({ gcps, onChange }: { gcps: GCPPoint[]; onChange: (g: GCPPoin
     reader.onload = ev => {
       const text = ev.target?.result as string;
       const lines = text.trim().split('\n').filter(l => l.trim() && !l.startsWith('#'));
-      const parsed: GCPPoint[] = lines.map(l => {
+      // Group CSV rows by label (each CSV row may be one observation)
+      const map = new Map<string, GCPPoint>();
+      for (const l of lines) {
         const [label, x, y, z, px, py, img] = l.split(/[\t,;]+/).map(s => s.trim());
-        return {
-          label: label || '',
-          x: parseFloat(x) || 0,
-          y: parseFloat(y) || 0,
-          z: parseFloat(z) || 0,
-          pixel_x: px ? parseFloat(px) : undefined,
-          pixel_y: py ? parseFloat(py) : undefined,
-          image_name: img || undefined,
-        };
-      }).filter(g => g.label);
+        if (!label) continue;
+        if (!map.has(label)) {
+          map.set(label, {
+            label,
+            x: parseFloat(x) || 0,
+            y: parseFloat(y) || 0,
+            z: parseFloat(z) || 0,
+            observations: [],
+          });
+        }
+        if (img) {
+          map.get(label)!.observations.push({
+            image: img,
+            pixel_x: parseFloat(px) || 0,
+            pixel_y: parseFloat(py) || 0,
+          });
+        }
+      }
+      const parsed = Array.from(map.values());
       if (parsed.length > 0) onChange([...gcps, ...parsed]);
     };
     reader.readAsText(file);
@@ -350,6 +403,18 @@ function GCPEditor({ gcps, onChange }: { gcps: GCPPoint[]; onChange: (g: GCPPoin
             : `${gcps.length} GCP${gcps.length > 1 ? 's' : ''} defined`}
         </div>
         <div className="flex gap-2">
+          {projectId && onAutoDetect && (
+            <button
+              type="button"
+              id="gcp-auto-detect-open"
+              className="btn btn-primary btn-sm"
+              style={{ background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)', border: 'none' }}
+              onClick={onAutoDetect}
+              title="Use AI to find GCP targets in photos automatically"
+            >
+              🎯 Auto-Detect
+            </button>
+          )}
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => fileRef.current?.click()}>
             📂 Import CSV
           </button>
@@ -361,35 +426,75 @@ function GCPEditor({ gcps, onChange }: { gcps: GCPPoint[]; onChange: (g: GCPPoin
       </div>
 
       {gcps.length > 0 && (
-        <div className="table-wrap" style={{ marginTop: 8 }}>
-          <table>
+        <div className="table-wrap" style={{ marginTop: 8, overflowX: 'auto' }}>
+          <table style={{ minWidth: 700 }}>
             <thead>
               <tr>
                 <th>Label</th>
                 <th>X (Easting)</th>
                 <th>Y (Northing)</th>
                 <th>Z (Elev.)</th>
-                <th>Pixel X</th>
-                <th>Pixel Y</th>
-                <th>Image</th>
+                <th>Image Observations</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {gcps.map((g, i) => (
-                <tr key={i}>
-                  {(['label', 'x', 'y', 'z', 'pixel_x', 'pixel_y', 'image_name'] as (keyof GCPPoint)[]).map(f => (
-                    <td key={f}>
+                <tr key={i} style={{ verticalAlign: 'top' }}>
+                  {/* Coordinate fields */}
+                  {(['label', 'x', 'y', 'z'] as const).map(f => (
+                    <td key={f} style={{ width: f === 'label' ? 90 : 120 }}>
                       <input
                         className="input"
-                        style={{ fontSize: 12, padding: '4px 8px' }}
-                        type={['x','y','z','pixel_x','pixel_y'].includes(f as string) ? 'number' : 'text'}
+                        style={{ fontSize: 12, padding: '4px 8px', width: '100%' }}
+                        type={f === 'label' ? 'text' : 'number'}
                         value={(g[f] as string | number) ?? ''}
-                        onChange={e => updateRow(i, f, e.target.value)}
+                        onChange={e => updateCoord(i, f, e.target.value)}
                       />
                     </td>
                   ))}
+
+                  {/* Observations column */}
                   <td>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {g.observations.map((obs, j) => (
+                        <div key={j} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                          <span style={{
+                            fontSize: 11, padding: '2px 6px',
+                            background: 'var(--bg-elevated)', borderRadius: 4,
+                            border: '1px solid var(--border)', color: 'var(--text-secondary)',
+                            maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }} title={obs.image}>
+                            {obs.image}
+                          </span>
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                            ({Math.round(obs.pixel_x)}, {Math.round(obs.pixel_y)})
+                          </span>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm text-error"
+                            style={{ padding: '0 4px', height: 20, fontSize: 10 }}
+                            onClick={() => removeObservation(i, j)}
+                          >✕</button>
+                        </div>
+                      ))}
+                      {g.observations.length === 0 && (
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>No observations yet</span>
+                      )}
+                      {projectId && (
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          style={{ padding: '3px 8px', height: 24, fontSize: 11, marginTop: 2, alignSelf: 'flex-start' }}
+                          onClick={() => setPickingFor(i)}
+                        >
+                          + Pick Photo
+                        </button>
+                      )}
+                    </div>
+                  </td>
+
+                  <td style={{ verticalAlign: 'top', paddingTop: 6 }}>
                     <button type="button" className="btn btn-ghost btn-sm text-error" onClick={() => removeRow(i)}>✕</button>
                   </td>
                 </tr>
@@ -397,6 +502,17 @@ function GCPEditor({ gcps, onChange }: { gcps: GCPPoint[]; onChange: (g: GCPPoin
             </tbody>
           </table>
         </div>
+      )}
+
+      {pickingFor !== null && projectId && (
+        <GCPImagePicker
+          projectId={projectId}
+          gcpX={gcps[pickingFor]?.x}
+          gcpY={gcps[pickingFor]?.y}
+          gcpLabel={gcps[pickingFor]?.label}
+          onSelect={handlePickerSelect}
+          onClose={() => setPickingFor(null)}
+        />
       )}
     </div>
   );
@@ -458,6 +574,32 @@ export default function NewProject() {
 
   // GCPs
   const [gcps, setGcps] = useState<GCPPoint[]>([]);
+  const [showAutoDetect, setShowAutoDetect] = useState(false);
+
+  // Build gcpCoords map: label -> {lat, lon}.
+  // For WGS84 projects x=lon, y=lat. For projected CRS we use proj4 to convert.
+  // NOTE: Survey convention often uses X=Northing, Y=Easting (opposite of GIS).
+  // proj4 expects [Easting, Northing], so we pass [g.y, g.x] for projected CRS.
+  const gcpCoords = React.useMemo(() => {
+    const map: Record<string, { lat: number; lon: number }> = {};
+    for (const g of gcps) {
+      if (g.x === 0 && g.y === 0) continue;
+      if (coordSys === 'EPSG:4326') {
+        map[g.label] = { lat: g.y, lon: g.x };
+      } else {
+        try {
+          // Survey files: X=Northing, Y=Easting → pass [Y, X] to proj4
+          const [lon, lat] = proj4(coordSys, 'EPSG:4326', [g.y, g.x]);
+          if (isFinite(lat) && isFinite(lon)) {
+            map[g.label] = { lat, lon };
+          }
+        } catch {
+          // unknown projection — skip, user will see ⚠️ in auto-detect panel
+        }
+      }
+    }
+    return map;
+  }, [gcps, coordSys]);
 
   // Submission
   const [submitting, setSubmitting] = useState(false);
@@ -615,6 +757,9 @@ export default function NewProject() {
             <label>Coordinate System</label>
             <select className="select" value={coordSys} onChange={e => setCoordSys(e.target.value)}>
               <option value="EPSG:4326">WGS84 (EPSG:4326) — Lat/Lon</option>
+              <option value="EPSG:6529">NAD83(2011) / NM Central (EPSG:6529)</option>
+              <option value="EPSG:6528">NAD83(2011) / NM East (EPSG:6528)</option>
+              <option value="EPSG:6530">NAD83(2011) / NM West (EPSG:6530)</option>
               <option value="EPSG:32654">WGS84 UTM Zone 54N (EPSG:32654)</option>
               <option value="EPSG:32610">WGS84 UTM Zone 10N (EPSG:32610)</option>
               <option value="EPSG:27700">British National Grid (EPSG:27700)</option>
@@ -791,7 +936,35 @@ export default function NewProject() {
             GCPs are optional but significantly improve absolute accuracy. Each GCP needs
             surveyed coordinates (X/Y/Z) and at least one image observation.
           </p>
-          <GCPEditor gcps={gcps} onChange={setGcps} />
+          <GCPEditor
+            gcps={gcps}
+            onChange={setGcps}
+            projectId={projectId}
+            onAutoDetect={projectId ? () => setShowAutoDetect(true) : undefined}
+          />
+
+          {showAutoDetect && projectId && (
+            <GcpAutoDetect
+              projectId={projectId}
+              gcps={gcps}
+              gcpCoords={gcpCoords}
+              onAccept={(label, imageName, px, py) => {
+                setGcps(prev => prev.map(g =>
+                  g.label === label
+                    ? { ...g, observations: [...g.observations, { image: imageName, pixel_x: px, pixel_y: py }] }
+                    : g
+                ));
+              }}
+              onReject={(label, imageName) => {
+                setGcps(prev => prev.map(g =>
+                  g.label === label
+                    ? { ...g, observations: g.observations.filter(o => o.image !== imageName) }
+                    : g
+                ));
+              }}
+              onClose={() => setShowAutoDetect(false)}
+            />
+          )}
 
           <div className="flex justify-between mt-6">
             <button className="btn btn-ghost" onClick={() => setStep(3)}>← Back</button>

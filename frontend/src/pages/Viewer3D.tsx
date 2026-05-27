@@ -132,13 +132,11 @@ function OutputSelector({ outputs, selected, onSelect }: {
   selected: JobOutput | null;
   onSelect: (o: JobOutput) => void;
 }) {
-  const viewable = outputs.filter(o => ['mesh', 'mesh_glb', 'point_cloud', 'ept'].includes(o.output_type));
+  const viewable = outputs.filter(o => ['mesh_glb', 'ept'].includes(o.output_type));
   if (viewable.length === 0) return null;
 
   const label = (o: JobOutput) => {
-    if (o.output_type === 'mesh') return '🔷 3D Mesh (OBJ)';
     if (o.output_type === 'mesh_glb') return '🔷 3D Mesh (GLB)';
-    if (o.output_type === 'point_cloud') return '☁️ Point Cloud';
     if (o.output_type === 'ept') return '✨ Potree Stream';
     return o.output_type;
   };
@@ -180,23 +178,19 @@ export default function Viewer3D() {
     refetchInterval: 10000,
   });
 
-  // Auto-select: prefer EPT (Potree stream), then GLB mesh, then OBJ mesh
+  // Auto-select: prefer EPT (Potree stream), then GLB mesh
   useEffect(() => {
     if (outputs.length > 0 && !selectedOutput) {
-      const ept    = outputs.find((o: JobOutput) => o.output_type === 'ept');
-      const glb    = outputs.find((o: JobOutput) => o.output_type === 'mesh_glb');
-      const mesh   = outputs.find((o: JobOutput) => o.output_type === 'mesh');
-      const pc     = outputs.find((o: JobOutput) => o.output_type === 'point_cloud');
-      setSelectedOutput(ept || glb || mesh || pc || null);
+      const ept = outputs.find((o: JobOutput) => o.output_type === 'ept');
+      const glb = outputs.find((o: JobOutput) => o.output_type === 'mesh_glb');
+      setSelectedOutput(ept || glb || null);
     }
   }, [outputs, selectedOutput]);
 
   // Determine view mode
   const viewMode: ViewMode =
-    selectedOutput?.output_type === 'ept'         ? 'potree' :
-    selectedOutput?.output_type === 'mesh_glb'    ? 'mesh'   :
-    selectedOutput?.output_type === 'mesh'        ? 'mesh'   :
-    selectedOutput?.output_type === 'point_cloud' ? 'potree' : 'none';
+    selectedOutput?.output_type === 'ept'      ? 'potree' :
+    selectedOutput?.output_type === 'mesh_glb' ? 'mesh'   : 'none';
 
   // URLs
   const meshUrl = viewMode === 'mesh' && selectedOutput
@@ -204,14 +198,15 @@ export default function Viewer3D() {
     : null;
 
   const eptUrl = viewMode === 'potree' && selectedOutput
-    ? (selectedOutput.output_type === 'ept'
-        ? `${API_URL}/jobs/${jobId}/ept/ept.json`
-        : `${API_URL}/jobs/${jobId}/download/point_cloud`)
+    ? `${API_URL}/jobs/${jobId}/ept/ept.json`
     : null;
 
   const handleReset = () => {
     controlsRef.current?.reset();
   };
+
+  const hasLaz = outputs.some((o: JobOutput) => o.output_type === 'point_cloud');
+  const hasGlb = outputs.some((o: JobOutput) => o.output_type === 'mesh_glb');
 
   return (
     <div style={{ width: '100%', height: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -225,22 +220,22 @@ export default function Viewer3D() {
           )}
         </div>
         <div className="topbar-right">
-          {selectedOutput && selectedOutput.output_type !== 'ept' && (
+          {hasGlb && (
             <a
-              href={`${API_URL}/jobs/${jobId}/download/${selectedOutput.output_type}`}
+              href={`${API_URL}/jobs/${jobId}/download/mesh_glb`}
               className="btn btn-secondary btn-sm"
               download
             >
-              ↓ Download
+              ↓ Download GLB
             </a>
           )}
-          {selectedOutput?.output_type === 'point_cloud' && (
+          {hasLaz && (
             <a
               href={`${API_URL}/jobs/${jobId}/download/point_cloud`}
               className="btn btn-ghost btn-sm"
               download
             >
-              ↓ LAZ File
+              ↓ Download LAZ
             </a>
           )}
         </div>

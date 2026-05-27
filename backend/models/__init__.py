@@ -101,7 +101,7 @@ class Job(SQLModel, table=True):
     gcp_rmse_total: Optional[float] = None
 
     project: Optional["Project"] = Relationship(back_populates="jobs")
-    outputs: List[JobOutput] = Relationship(back_populates="job")
+    outputs: List[JobOutput] = Relationship(back_populates="job", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
 
 # ─── Project ──────────────────────────────────────────────────────────────────
@@ -132,5 +132,5 @@ class Project(SQLModel, table=True):
     bbox_max_lon: Optional[float] = None
     area_km2: Optional[float] = None         # Estimated coverage area
 
-    jobs: List[Job] = Relationship(back_populates="project")
-    gcps: List[GCPPoint] = Relationship(back_populates="project")
+    jobs: List[Job] = Relationship(back_populates="project", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    gcps: List[GCPPoint] = Relationship(back_populates="project", sa_relationship_kwargs={"cascade": "all, delete-orphan"})

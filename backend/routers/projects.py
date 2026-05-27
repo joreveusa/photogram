@@ -69,9 +69,85 @@ def delete_project(project_id: str, session: Session = Depends(get_session)):
     if project.image_dir and Path(project.image_dir).exists():
         shutil.rmtree(project.image_dir, ignore_errors=True)
 
+    if project.output_dir and Path(project.output_dir).exists():
+        shutil.rmtree(project.output_dir, ignore_errors=True)
+
+    # Manually delete related GCPs
+    for gcp in project.gcps:
+        session.delete(gcp)
+        
+    # Manually delete related Jobs and their Outputs
+    for job in project.jobs:
+        for output in job.outputs:
+            session.delete(output)
+        session.delete(job)
+
     session.delete(project)
     session.commit()
     return {"ok": True}
+
+
+@router.patch("/{project_id}", response_model=dict)
+def update_project(
+    project_id: str,
+    payload: dict,
+    session: Session = Depends(get_session),
+):
+    """Rename or update description of a project."""
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if payload.get("name"):
+        project.name = payload["name"].strip()
+    if "description" in payload:
+        project.description = payload["description"]
+
+    project.updated_at = datetime.utcnow()
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    return _project_dict(project)
+
+
+@router.post("/{project_id}/duplicate", response_model=dict)
+def duplicate_project(project_id: str, session: Session = Depends(get_session)):
+    """Duplicate a project — copies metadata and GCPs, not images."""
+    source = session.get(Project, project_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    new_proj = Project(
+        name=f"{source.name} (Copy)",
+        description=source.description,
+        coordinate_system=source.coordinate_system,
+        rtk_mode=source.rtk_mode,
+        rtk_accuracy_h=source.rtk_accuracy_h,
+        rtk_accuracy_v=source.rtk_accuracy_v,
+    )
+    staging_dir = Path(OUTPUT_DIR) / "staging" / new_proj.id
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    new_proj.image_dir = str(staging_dir)
+    new_proj.output_dir = str(Path(OUTPUT_DIR) / new_proj.id)
+    session.add(new_proj)
+
+    # Copy GCPs (coordinates only — image observations reference old filenames)
+    source_gcps = session.exec(
+        select(GCPPoint).where(GCPPoint.project_id == project_id)
+    ).all()
+    for g in source_gcps:
+        session.add(GCPPoint(
+            project_id=new_proj.id,
+            label=g.label,
+            x=g.x, y=g.y, z=g.z,
+            pixel_x=g.pixel_x,
+            pixel_y=g.pixel_y,
+            image_name=g.image_name,
+        ))
+
+    session.commit()
+    session.refresh(new_proj)
+    return _project_dict(new_proj)
 
 
 # ─── Phase 3: RTK/PPK config ──────────────────────────────────────────────────
@@ -196,34 +272,195 @@ def save_gcps(
     for g in existing:
         session.delete(g)
 
+    rows_written = 0
     for g in gcps:
-        gcp = GCPPoint(
-            project_id=project_id,
-            label=g.get("label", ""),
-            x=float(g["x"]),
-            y=float(g["y"]),
-            z=float(g["z"]),
-            pixel_x=g.get("pixel_x"),
-            pixel_y=g.get("pixel_y"),
-            image_name=g.get("image_name"),
-        )
-        session.add(gcp)
+        label = g.get("label", "")
+        x, y, z = float(g["x"]), float(g["y"]), float(g["z"])
+
+        # Multi-observation format: [{image, pixel_x, pixel_y}, ...]
+        observations = g.get("observations") or []
+
+        # Legacy single-observation format
+        if not observations and g.get("image_name"):
+            observations = [{
+                "image": g["image_name"],
+                "pixel_x": g.get("pixel_x"),
+                "pixel_y": g.get("pixel_y"),
+            }]
+
+        if observations:
+            for obs in observations:
+                img = obs.get("image") or obs.get("image_name")
+                session.add(GCPPoint(
+                    project_id=project_id,
+                    label=label,
+                    x=x, y=y, z=z,
+                    pixel_x=obs.get("pixel_x"),
+                    pixel_y=obs.get("pixel_y"),
+                    image_name=img,
+                ))
+                rows_written += 1
+        else:
+            # GCP with no observations yet — save coords only
+            session.add(GCPPoint(
+                project_id=project_id,
+                label=label,
+                x=x, y=y, z=z,
+            ))
+            rows_written += 1
+
+    project.updated_at = datetime.utcnow()
+    session.add(project)
 
     session.commit()
-    return {"saved": len(gcps)}
+    return {"saved": len(gcps), "rows": rows_written}
 
 
 @router.get("/{project_id}/gcps", response_model=List[dict])
 def get_gcps(project_id: str, session: Session = Depends(get_session)):
-    gcps = session.exec(select(GCPPoint).where(GCPPoint.project_id == project_id)).all()
-    return [_gcp_dict(g) for g in gcps]
+    rows = session.exec(select(GCPPoint).where(GCPPoint.project_id == project_id)).all()
+
+    # Group rows by label — the DB stores one row per observation
+    from collections import OrderedDict
+    grouped: OrderedDict = OrderedDict()
+    for g in rows:
+        if g.label not in grouped:
+            grouped[g.label] = {
+                "id": g.id,
+                "label": g.label,
+                "x": g.x, "y": g.y, "z": g.z,
+                "observations": [],
+                # Legacy single-obs fields (for backward compat)
+                "pixel_x": g.pixel_x,
+                "pixel_y": g.pixel_y,
+                "image_name": g.image_name,
+                "error_x": g.error_x,
+                "error_y": g.error_y,
+                "error_z": g.error_z,
+                "error_total": g.error_total,
+            }
+        if g.image_name:
+            grouped[g.label]["observations"].append({
+                "image": g.image_name,
+                "pixel_x": g.pixel_x,
+                "pixel_y": g.pixel_y,
+            })
+
+    return list(grouped.values())
+
+
+# ─── GCP Auto-Detection ───────────────────────────────────────────────────────
+
+@router.post("/{project_id}/gcps/auto-detect", response_model=List[dict])
+async def auto_detect_gcps(
+    project_id: str,
+    payload: dict,
+    session: Session = Depends(get_session),
+):
+    """Run computer-vision GCP target detection on uploaded images.
+
+    Payload fields:
+      strategy      : str  — "triangle_cross" | "checkerboard" | "aruco" |
+                             "circle_grid" | "template" | "blob"
+      gcps          : list — [{label, x, y, z, lat, lon}] (lat/lon are decimal degrees)
+      radius_m      : float (default 80) — GPS search radius per GCP
+      max_candidates: int   (default 30)  — max images to scan per GCP
+      options       : dict  — strategy-specific overrides (cb_pattern, aruco_dict_id, …)
+    """
+    from services.gcp_detector import run_auto_detect, STRATEGY_CHOICES
+    from services.exif import extract_exif
+
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.image_dir or not Path(project.image_dir).exists():
+        raise HTTPException(status_code=400, detail="No images uploaded for this project")
+
+    strategy  = payload.get("strategy", "triangle_cross")
+    gcps      = payload.get("gcps", [])
+    radius_m  = float(payload.get("radius_m", 80.0))
+    max_cands = int(payload.get("max_candidates", 30))
+    options   = payload.get("options", {})
+
+    if strategy not in STRATEGY_CHOICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"strategy must be one of {STRATEGY_CHOICES}"
+        )
+
+    if not gcps:
+        raise HTTPException(status_code=400, detail="No GCPs provided in payload")
+
+    image_dir = Path(project.image_dir)
+    image_paths = sorted(
+        p for p in image_dir.iterdir()
+        if p.suffix.lower() in IMAGE_EXTS
+    )
+
+    if not image_paths:
+        raise HTTPException(status_code=400, detail="No images found in project image directory")
+
+    # Build lightweight image metadata list (filename + GPS from EXIF cache)
+    image_meta = []
+    for p in image_paths:
+        exif = extract_exif(p)
+        image_meta.append({
+            "filename":  p.name,
+            "latitude":  exif.get("latitude"),
+            "longitude": exif.get("longitude"),
+        })
+
+    # Parse strategy-specific options
+    cb_pattern   = tuple(options.get("cb_pattern", [4, 4]))
+    aruco_dict   = int(options.get("aruco_dict_id", 0))
+    aruco_marker = options.get("aruco_marker_id", None)
+    cg_pattern   = tuple(options.get("cg_pattern", [4, 4]))
+    cg_asym      = bool(options.get("cg_asymmetric", False))
+    tmpl_thresh  = float(options.get("template_threshold", 0.65))
+    blob_min     = float(options.get("blob_min_area", 500.0))
+    blob_max     = float(options.get("blob_max_area", 50000.0))
+    spray_color  = str(options.get("spray_color", "pink"))
+
+    # Template upload path (if provided as a stored filename in image_dir)
+    template_path = None
+    if strategy == "template" and options.get("template_filename"):
+        tp = image_dir / options["template_filename"]
+        if tp.exists():
+            template_path = tp
+        else:
+            raise HTTPException(status_code=400, detail="Template file not found in project images")
+
+    try:
+        results = run_auto_detect(
+            image_dir=image_dir,
+            image_meta=image_meta,
+            gcps=gcps,
+            strategy=strategy,
+            radius_m=radius_m,
+            max_candidates=max_cands,
+            cb_pattern=cb_pattern,
+            aruco_dict_id=aruco_dict,
+            aruco_marker_id=aruco_marker,
+            cg_pattern=cg_pattern,
+            cg_asymmetric=cg_asym,
+            template_path=template_path,
+            template_threshold=tmpl_thresh,
+            blob_min_area=blob_min,
+            blob_max_area=blob_max,
+            spray_color=spray_color,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Detection failed: {exc}")
+
+    return results
 
 
 # ─── Image gallery endpoints ──────────────────────────────────────────────────
 
 @router.get("/{project_id}/images", response_model=List[dict])
 def list_images(project_id: str, session: Session = Depends(get_session)):
-    """Return a list of uploaded image filenames and sizes for the gallery."""
+    """Return uploaded image filenames, sizes, and GPS coordinates from EXIF."""
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -235,9 +472,15 @@ def list_images(project_id: str, session: Session = Depends(get_session)):
     images = []
     for p in sorted(staging_dir.iterdir()):
         if p.suffix.lower() in IMAGE_EXTS:
+            # Extract per-image EXIF for GPS coords
+            from services.exif import extract_exif
+            exif = extract_exif(p)
             images.append({
                 "filename": p.name,
                 "size_bytes": p.stat().st_size,
+                "latitude": exif.get("latitude"),
+                "longitude": exif.get("longitude"),
+                "altitude": exif.get("altitude"),
             })
     return images
 
@@ -303,7 +546,7 @@ def _project_dict(p: Project) -> dict:
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
         "job_count": len(p.jobs) if p.jobs else 0,
-        "gcp_count": len(p.gcps) if p.gcps else 0,
+        "gcp_count": len({g.label for g in p.gcps}) if p.gcps else 0,
         # Phase 3: RTK config
         "rtk_accuracy_h": p.rtk_accuracy_h,
         "rtk_accuracy_v": p.rtk_accuracy_v,

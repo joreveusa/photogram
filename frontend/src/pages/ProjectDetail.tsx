@@ -587,7 +587,7 @@ export default function ProjectDetail() {
               <div className="flex-col gap-2 text-sm">
                 <div className="flex justify-between">
                   <span className="text-muted">Preset</span>
-                  <span>{latestJob.preset.replace(/_/g, ' ')}</span>
+                  <span>{latestJob.preset?.replace(/_/g, ' ') ?? latestJob.preset}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted">Images</span>
@@ -645,7 +645,7 @@ export default function ProjectDetail() {
                   }}>
                     <div>
                       <div>{new Date(j.created_at).toLocaleDateString()}</div>
-                      <div className="text-xs text-muted">{j.preset.replace(/_/g, ' ')}</div>
+                      <div className="text-xs text-muted">{j.preset?.replace(/_/g, ' ') ?? j.preset}</div>
                     </div>
                     <StatusBadge status={j.status} />
                   </div>

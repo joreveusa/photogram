@@ -4,29 +4,49 @@
  * Reads/saves via projectsApi.saveGCPs / projectsApi.getGCPs.
  */
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useMemo } from 'react';
+import GCPImagePicker from './GCPImagePicker';
+import GCPPhotoOrganizer from './GCPPhotoOrganizer';
+import GcpAutoDetect from './GcpAutoDetect';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { projectsApi, type GCPPoint } from '../api';
 import { useToast } from '../hooks/useToast';
+import proj4 from 'proj4';
 
 interface Props { projectId: string; gcpCount: number; }
 
-const EMPTY_GCP: Omit<GCPPoint, 'id'> = { label: '', x: 0, y: 0, z: 0 };
+const EMPTY_GCP: Omit<GCPPoint, 'id'> = { label: '', x: 0, y: 0, z: 0, observations: [] };
 
 function parseCSV(text: string): GCPPoint[] {
   const lines = text.trim().split('\n').filter(l => l.trim() && !l.startsWith('#'));
   const gcps: GCPPoint[] = [];
 
+  const looksLikePointId = (v: string) => {
+    const n = Number(v);
+    return Number.isInteger(n) && n >= 1 && n <= 99999;
+  };
+  const looksLikeCoord = (v: string) => {
+    const n = Number(v);
+    return isFinite(n) && Math.abs(n) > 5000;
+  };
+
   for (const line of lines) {
     const parts = line.split(/[\t,\s]+/).map(p => p.trim());
-    // Formats: label x y z  OR  x y z label  OR  label lon lat alt
     if (parts.length < 4) continue;
-    const hasLabel = isNaN(Number(parts[0]));
-    const [label, a, b, c] = hasLabel
-      ? [parts[0], parts[1], parts[2], parts[3]]
-      : [parts[3], parts[0], parts[1], parts[2]];
+
+    // Format detection:
+    // 1) Non-numeric first field  → always label,x,y,z
+    // 2) Numeric label at start   → label,x,y,z  (survey format: 1005  1777368  1666716  5672)
+    //    Detected when: first value is a small integer AND at least one of 2nd/3rd values is a large coord
+    // 3) Otherwise               → x,y,z,label  (ODM format: lon lat alt label)
+    let label: string, a: string, b: string, c: string;
+    if (isNaN(Number(parts[0])) || (looksLikePointId(parts[0]) && (looksLikeCoord(parts[1]) || looksLikeCoord(parts[2])))) {
+      [label, a, b, c] = [parts[0], parts[1], parts[2], parts[3]];
+    } else {
+      [label, a, b, c] = [parts[3], parts[0], parts[1], parts[2]];
+    }
     if (!label || isNaN(Number(a))) continue;
-    gcps.push({ label, x: Number(a), y: Number(b), z: Number(c) });
+    gcps.push({ label, x: Number(a), y: Number(b), z: Number(c), observations: [] });
   }
   return gcps;
 }
@@ -46,11 +66,12 @@ function fmtErr(v?: number): string {
 // ─── Row editor ───────────────────────────────────────────────────────────────
 
 function GCPRow({
-  gcp, index, onChange, onDelete, readOnly,
+  gcp, index, onChange, onDelete, onPick, readOnly,
 }: {
   gcp: GCPPoint; index: number;
   onChange: (i: number, field: keyof GCPPoint, val: string | number) => void;
   onDelete: (i: number) => void;
+  onPick: (i: number) => void;
   readOnly: boolean;
 }) {
   const hasError = gcp.error_total != null;
@@ -76,6 +97,24 @@ function GCPRow({
           />
         </td>
       ))}
+      <td>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          {gcp.observations.length === 0 ? (
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>—</span>
+          ) : (
+            <span style={{ fontSize: 11, color: 'var(--success)' }}>
+              {gcp.observations.length} image{gcp.observations.length > 1 ? 's' : ''}
+            </span>
+          )}
+          {!readOnly && (
+            <button
+              className="btn btn-primary btn-sm"
+              style={{ padding: '2px 8px', fontSize: 10, height: 22 }}
+              onClick={() => onPick(index)}
+            >📷 Pick</button>
+          )}
+        </div>
+      </td>
       <td style={{ fontSize: 11, fontFamily: 'monospace', color: rmseColor(gcp.error_x) }}>
         {hasError ? fmtErr(gcp.error_x) : '—'}
       </td>
@@ -118,11 +157,39 @@ export default function GCPEditor({ projectId }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<GCPPoint[]>([]);
+  const [pickingFor, setPickingFor] = useState<number | null>(null);
+  const [showOrganizer, setShowOrganizer] = useState(false);
+  const [showAutoDetect, setShowAutoDetect] = useState(false);
 
   const { data: saved = [], isLoading } = useQuery<GCPPoint[]>({
     queryKey: ['gcps', projectId],
     queryFn:  () => projectsApi.getGCPs(projectId),
   });
+
+  // Also fetch the project so we know its coordinate system for auto-detect
+  const { data: project } = useQuery<any>({
+    queryKey: ['project', projectId],
+    queryFn:  () => projectsApi.get(projectId),
+  });
+
+  // Build lat/lon coords for auto-detect (same proj4 logic as NewProject wizard)
+  // Survey convention: X=Northing, Y=Easting → pass [y, x] to proj4
+  const gcpCoords = useMemo(() => {
+    const coordSys = project?.coordinate_system ?? 'EPSG:4326';
+    const map: Record<string, { lat: number; lon: number }> = {};
+    for (const g of saved) {
+      if (g.x === 0 && g.y === 0) continue;
+      if (coordSys === 'EPSG:4326') {
+        map[g.label] = { lat: g.y, lon: g.x };
+      } else {
+        try {
+          const [lon, lat] = proj4(coordSys, 'EPSG:4326', [g.y, g.x]);
+          if (isFinite(lat) && isFinite(lon)) map[g.label] = { lat, lon };
+        } catch { /* unknown projection */ }
+      }
+    }
+    return map;
+  }, [saved, project]);
 
   const saveMutation = useMutation({
     mutationFn: (gcps: GCPPoint[]) => projectsApi.saveGCPs(projectId, gcps),
@@ -173,6 +240,30 @@ export default function GCPEditor({ projectId }: Props) {
     e.target.value = '';
   };
 
+  // Detect when columns got saved in wrong order (survey IDs treated as ODM label-at-end)
+  // Symptom: labels look like elevations (small decimals, e.g. 5672.4472) and x values
+  // look like point numbers (small integers, e.g. 1005)
+  const columnsLookSwapped = draft.length > 0
+    && draft.every(g => {
+      const labelNum = parseFloat(g.label);
+      return !isNaN(labelNum) && labelNum > 0 && labelNum < 9999
+        && g.label.includes('.')          // label has decimals → looks like elevation
+        && Number.isInteger(g.x) && g.x > 0 && g.x < 9999; // x is small integer → looks like point ID
+    });
+
+  const repairColumnOrder = () => {
+    // Inverse of the bad parse: [label=elev, x=id, y=easting, z=northing]
+    // → correct:              [label=id,   x=easting, y=northing, z=elev]
+    setDraft(prev => prev.map(g => ({
+      ...g,
+      label: String(g.x),
+      x: g.y,
+      y: g.z,
+      z: parseFloat(g.label),
+    })));
+    toast.success('Columns repaired', 'Review values, then click Save');
+  };
+
   const display = editing ? draft : saved;
   const hasAccuracy = display.some(g => g.error_total != null);
 
@@ -198,6 +289,24 @@ export default function GCPEditor({ projectId }: Props) {
               <button className="btn btn-ghost btn-sm" onClick={() => fileRef.current?.click()}>
                 ↑ Import CSV
               </button>
+              {saved.length > 0 && (
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setShowAutoDetect(true)}
+                  title="Auto-detect GCP targets in aerial photos"
+                >
+                  🎯 Auto-Detect
+                </button>
+              )}
+              {saved.length > 0 && (
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setShowOrganizer(true)}
+                  title="View all photos grouped by proximity to each GCP"
+                >
+                  📸 Organize Photos
+                </button>
+              )}
               <button className="btn btn-secondary btn-sm" onClick={startEdit}>
                 {saved.length > 0 ? '✏ Edit' : '＋ Add GCPs'}
               </button>
@@ -218,6 +327,32 @@ export default function GCPEditor({ projectId }: Props) {
           )}
         </div>
       </div>
+
+      {/* Column-swap repair banner */}
+      {editing && columnsLookSwapped && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)',
+          borderRadius: 8, padding: '10px 14px', marginBottom: 12, gap: 12,
+        }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--warning)' }}>
+              ⚠ Column order looks wrong
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+              Labels appear to be elevations and X values look like point numbers.
+              This happens when a survey CSV with numeric IDs is imported.
+            </div>
+          </div>
+          <button
+            className="btn btn-sm"
+            style={{ background: 'var(--warning)', color: '#000', fontWeight: 600, flexShrink: 0 }}
+            onClick={repairColumnOrder}
+          >
+            🔧 Repair Columns
+          </button>
+        </div>
+      )}
 
       {/* CSV format hint */}
       {editing && (
@@ -248,6 +383,7 @@ export default function GCPEditor({ projectId }: Props) {
                 <th>Easting / X</th>
                 <th>Northing / Y</th>
                 <th>Elevation / Z</th>
+                <th>Image</th>
                 <th>Err X</th>
                 <th>Err Y</th>
                 <th>Err Z</th>
@@ -261,6 +397,7 @@ export default function GCPEditor({ projectId }: Props) {
                   key={g.id ?? i}
                   gcp={g} index={i}
                   onChange={changeRow} onDelete={deleteRow}
+                  onPick={(idx) => setPickingFor(idx)}
                   readOnly={!editing}
                 />
               ))}
@@ -290,6 +427,65 @@ export default function GCPEditor({ projectId }: Props) {
             );
           })}
         </div>
+      )}
+
+      {pickingFor !== null && (
+        <GCPImagePicker
+          projectId={projectId}
+          gcpX={draft[pickingFor]?.x}
+          gcpY={draft[pickingFor]?.y}
+          gcpLabel={draft[pickingFor]?.label}
+          onSelect={(imageName, pixelX, pixelY) => {
+            setDraft(prev => prev.map((g, idx) =>
+              idx === pickingFor
+                ? { ...g, observations: [...g.observations, { image: imageName, pixel_x: pixelX, pixel_y: pixelY }] }
+                : g
+            ));
+            setPickingFor(null);
+          }}
+          onClose={() => setPickingFor(null)}
+        />
+      )}
+
+      {showOrganizer && (
+        <GCPPhotoOrganizer
+          projectId={projectId}
+          gcps={saved}
+          onAssign={(gcpLabel, imageName, pixelX, pixelY) => {
+            const updated = saved.map((g) =>
+              g.label === gcpLabel
+                ? { ...g, observations: [...g.observations, { image: imageName, pixel_x: pixelX, pixel_y: pixelY }] }
+                : g
+            );
+            saveMutation.mutate(updated);
+          }}
+          onClose={() => setShowOrganizer(false)}
+        />
+      )}
+
+      {showAutoDetect && (
+        <GcpAutoDetect
+          projectId={projectId}
+          gcps={saved}
+          gcpCoords={gcpCoords}
+          onAccept={(gcpLabel, imageName, pixelX, pixelY) => {
+            const updated = saved.map((g) =>
+              g.label === gcpLabel
+                ? { ...g, observations: [...g.observations, { image: imageName, pixel_x: pixelX, pixel_y: pixelY }] }
+                : g
+            );
+            saveMutation.mutate(updated);
+          }}
+          onReject={(gcpLabel, imageName) => {
+            const updated = saved.map((g) =>
+              g.label === gcpLabel
+                ? { ...g, observations: g.observations.filter(o => o.image !== imageName) }
+                : g
+            );
+            saveMutation.mutate(updated);
+          }}
+          onClose={() => setShowAutoDetect(false)}
+        />
       )}
     </div>
   );

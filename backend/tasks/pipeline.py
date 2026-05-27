@@ -101,16 +101,70 @@ def _job_snapshot(job_id: str) -> dict:
 
 # ─── GCP file builder ─────────────────────────────────────────────────────────
 
-def _build_gcp_file(gcps: list) -> str | None:
+def _build_gcp_file(gcps: list, coordinate_system: str = "EPSG:4326") -> str | None:
+    """
+    Build an ODM-compatible GCP file.
+
+    ODM GCP format (one line per observation):
+        <CRS header>
+        x y z pixel_x pixel_y image_name
+
+    For projected CRS (State Plane, UTM, etc.) we convert to WGS84 lat/lon
+    so ODM doesn't need a PROJ definition at runtime — it always understands
+    geographic coordinates.
+
+    Each GCPPoint may have multiple observations stored as a list under the
+    'observations' key: [{image, pixel_x, pixel_y}, ...].  Single-observation
+    GCPs may still use the legacy image_name / pixel_x / pixel_y keys.
+    """
     if not gcps:
         return None
-    lines = ["WGS84\n"]
+
+    # Try to convert projected → WGS84 so ODM always sees geographic coords.
+    # pyproj is available in the NodeODM container env; fall back gracefully.
+    converter = None
+    crs = (coordinate_system or "EPSG:4326").strip()
+    if crs not in ("EPSG:4326", "WGS84"):
+        try:
+            from pyproj import Transformer
+            converter = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+        except Exception:
+            pass  # pyproj not installed — write native coords with correct header
+
+    # ODM 3.5.6 crashes on a bare "WGS84" header (ref[1] IndexError in location.py).
+    # "EPSG:4326" is handled safely by the epsg_match regex that runs first.
+    header = "EPSG:4326" if converter else crs
+    lines = [header + "\n"]
+
     for g in gcps:
-        if g.get("image_name"):
-            lines.append(
-                f"{g['x']} {g['y']} {g['z']} "
-                f"{g.get('pixel_x', 0)} {g.get('pixel_y', 0)} {g['image_name']}\n"
-            )
+        x, y, z = float(g["x"]), float(g["y"]), float(g["z"])
+
+        # Convert projected → WGS84 (lon, lat)
+        if converter:
+            try:
+                lon, lat = converter.transform(y, x)  # survey: X=Northing, Y=Easting
+                gcp_x, gcp_y = lon, lat
+            except Exception:
+                gcp_x, gcp_y = x, y
+        else:
+            gcp_x, gcp_y = x, y
+
+        # Collect all observations: prefer new multi-obs list, fall back to legacy single
+        observations = g.get("observations") or []
+        if not observations and g.get("image_name"):
+            observations = [{
+                "image": g["image_name"],
+                "pixel_x": g.get("pixel_x", 0),
+                "pixel_y": g.get("pixel_y", 0),
+            }]
+
+        for obs in observations:
+            img = obs.get("image") or obs.get("image_name", "")
+            px  = obs.get("pixel_x", 0)
+            py  = obs.get("pixel_y", 0)
+            if img:
+                lines.append(f"{gcp_x} {gcp_y} {z} {px} {py} {img}\n")
+
     return "".join(lines) if len(lines) > 1 else None
 
 
@@ -164,6 +218,7 @@ def run_pipeline(self, job_id: str, preset: str = "survey_grade"):
             project = session.get(Project, job.project_id)
             image_dir = _normalize_path(project.image_dir)
             preset = job.preset or preset
+            coordinate_system = project.coordinate_system or "EPSG:4326"
             gcps = list(project.gcps) if project.gcps else []
             project_id = job.project_id
             # Phase 3: load custom ODM options + RTK accuracy
@@ -191,13 +246,21 @@ def run_pipeline(self, job_id: str, preset: str = "survey_grade"):
         )
 
         # ── 3. GCP file ──────────────────────────────────────────────────────
-        gcp_data = [
-            {"x": g.x, "y": g.y, "z": g.z,
-             "pixel_x": g.pixel_x, "pixel_y": g.pixel_y,
-             "image_name": g.image_name}
-            for g in gcps
-        ]
-        gcp_content = _build_gcp_file(gcp_data)
+        # Build one dict per GCP with all its observations.
+        # The DB stores one row per observation (label repeated), so group them.
+        gcp_obs_map: dict = {}
+        for g in gcps:
+            label = g.label
+            if label not in gcp_obs_map:
+                gcp_obs_map[label] = {"x": g.x, "y": g.y, "z": g.z, "observations": []}
+            if g.image_name:
+                gcp_obs_map[label]["observations"].append({
+                    "image": g.image_name,
+                    "pixel_x": g.pixel_x or 0,
+                    "pixel_y": g.pixel_y or 0,
+                })
+        gcp_data = list(gcp_obs_map.values())
+        gcp_content = _build_gcp_file(gcp_data, coordinate_system)
 
         # ── 4. Submit to NodeODM ─────────────────────────────────────────────
         def upload_progress(done, total):

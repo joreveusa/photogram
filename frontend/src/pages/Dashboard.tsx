@@ -1,5 +1,6 @@
+import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { projectsApi, systemApi, jobsApi, type Project, type SystemStats, type Job } from '../api';
 import MiniMap from '../components/MiniMap';
 
@@ -129,55 +130,193 @@ function ActiveJobTicker({ jobs, projects }: { jobs: Job[]; projects: Project[] 
   );
 }
 
+// ─── Rename Modal ─────────────────────────────────────────────────────────────
+
+function RenameModal({ project, onClose }: { project: Project; onClose: () => void }) {
+  const [name, setName] = React.useState(project.name);
+  const [desc, setDesc] = React.useState(project.description ?? '');
+  const qc = useQueryClient();
+
+  const save = async () => {
+    if (!name.trim()) return;
+    await projectsApi.update(project.id, { name: name.trim(), description: desc });
+    qc.invalidateQueries({ queryKey: ['projects'] });
+    onClose();
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}
+      onClick={e => e.target === e.currentTarget && onClose()}
+    >
+      <div className="card" style={{ width: 420, padding: 28 }}>
+        <h3 style={{ marginBottom: 20 }}>Rename Project</h3>
+        <div style={{ marginBottom: 14 }}>
+          <label className="text-xs text-muted" style={{ display: 'block', marginBottom: 6 }}>Project Name</label>
+          <input
+            className="input"
+            style={{ width: '100%' }}
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && save()}
+            autoFocus
+          />
+        </div>
+        <div style={{ marginBottom: 20 }}>
+          <label className="text-xs text-muted" style={{ display: 'block', marginBottom: 6 }}>Description (optional)</label>
+          <input
+            className="input"
+            style={{ width: '100%' }}
+            value={desc}
+            onChange={e => setDesc(e.target.value)}
+            placeholder="Short description…"
+          />
+        </div>
+        <div className="flex gap-2 justify-end">
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={!name.trim() || name.trim() === project.name && desc === (project.description ?? '')}
+            onClick={save}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Project Card ─────────────────────────────────────────────────────────────
 
 function ProjectCard({ project }: { project: Project }) {
   const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [renaming, setRenaming] = React.useState(false);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+
   const date = new Date(project.created_at).toLocaleDateString('en-US', {
     month: 'short', day: 'numeric', year: 'numeric',
   });
 
+  // Close menu on outside click
+  React.useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [menuOpen]);
+
+  const handleDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setMenuOpen(false);
+    if (!window.confirm(`Delete "${project.name}"?\n\nThis removes the project and all uploaded images. This cannot be undone.`)) return;
+    await projectsApi.delete(project.id);
+    qc.invalidateQueries({ queryKey: ['projects'] });
+  };
+
+  const handleDuplicate = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setMenuOpen(false);
+    await projectsApi.duplicate(project.id);
+    qc.invalidateQueries({ queryKey: ['projects'] });
+  };
+
   return (
-    <div
-      className={`card clickable card-status-${project.status}`}
-      onClick={() => navigate(`/projects/${project.id}`)}
-    >
-      {/* Map preview */}
-      {project.bbox && (
-        <div style={{ margin: '-20px -20px 16px', borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0', overflow: 'hidden' }}>
-          <MiniMap bbox={project.bbox} height={130} interactive={false} />
+    <>
+      <div
+        className={`card clickable card-status-${project.status}`}
+        onClick={() => navigate(`/projects/${project.id}`)}
+        style={{ position: 'relative' }}
+      >
+        {/* Map preview */}
+        {project.bbox && (
+          <div style={{ margin: '-20px -20px 16px', borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0', overflow: 'hidden' }}>
+            <MiniMap bbox={project.bbox} height={130} interactive={false} />
+          </div>
+        )}
+
+        <div className="flex items-center justify-between mb-3" style={{ gap: 8 }}>
+          <h3 className="truncate" style={{ flex: 1, minWidth: 0 }}>{project.name}</h3>
+          <StatusBadge status={project.status} />
+          {/* ⋮ menu */}
+          <div ref={menuRef} style={{ position: 'relative', flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ padding: '2px 8px', fontSize: 16, lineHeight: 1, borderRadius: 6 }}
+              title="Project actions"
+              onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
+            >⋮</button>
+            {menuOpen && (
+              <div style={{
+                position: 'absolute', right: 0, top: '100%', marginTop: 4,
+                background: 'var(--bg-card)', border: '1px solid var(--border)',
+                borderRadius: 10, boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+                minWidth: 160, overflow: 'hidden', zIndex: 100,
+              }}>
+                {[
+                  { icon: '✏️', label: 'Rename', action: (e: React.MouseEvent) => { e.stopPropagation(); setMenuOpen(false); setRenaming(true); } },
+                  { icon: '📋', label: 'Duplicate', action: handleDuplicate },
+                  { icon: '🗑', label: 'Delete', action: handleDelete, danger: true },
+                ].map(item => (
+                  <button
+                    key={item.label}
+                    onClick={item.action}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10,
+                      width: '100%', padding: '10px 16px',
+                      background: 'transparent', border: 'none',
+                      color: item.danger ? 'var(--error)' : 'var(--text-primary)',
+                      fontSize: 13, cursor: 'pointer', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-elevated)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <span>{item.icon}</span>
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-      )}
 
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="truncate" style={{ maxWidth: '70%' }}>{project.name}</h3>
-        <StatusBadge status={project.status} />
-      </div>
-
-      {project.description && (
-        <p className="text-sm mb-3 truncate">{project.description}</p>
-      )}
-
-      <div className="flex gap-4 text-xs text-muted">
-        <span>🖼 {project.image_count.toLocaleString()} images</span>
-        <span>📍 {project.gcp_count} GCPs</span>
-        <span>⚙ {project.job_count} jobs</span>
-      </div>
-
-      <div className="flex gap-3 text-xs text-muted mt-2">
-        {project.area_km2 != null && (
-          <span>📐 {project.area_km2.toFixed(3)} km²</span>
+        {project.description && (
+          <p className="text-sm mb-3 truncate">{project.description}</p>
         )}
-        {project.rtk_mode && project.rtk_mode !== 'none' && (
-          <span style={{ color: 'var(--accent)' }}>
-            📡 {project.rtk_mode.toUpperCase()}
-          </span>
-        )}
+
+        <div className="flex gap-4 text-xs text-muted">
+          <span>🖼 {project.image_count.toLocaleString()} images</span>
+          <span>📍 {project.gcp_count} GCPs</span>
+          <span>⚙ {project.job_count} jobs</span>
+        </div>
+
+        <div className="flex gap-3 text-xs text-muted mt-2">
+          {project.area_km2 != null && (
+            <span>📐 {project.area_km2.toFixed(3)} km²</span>
+          )}
+          {project.rtk_mode && project.rtk_mode !== 'none' && (
+            <span style={{ color: 'var(--accent)' }}>
+              📡 {project.rtk_mode.toUpperCase()}
+            </span>
+          )}
+        </div>
+
+        <div className="separator" />
+        <div className="text-xs text-muted">{date}</div>
       </div>
 
-      <div className="separator" />
-      <div className="text-xs text-muted">{date}</div>
-    </div>
+      {renaming && <RenameModal project={project} onClose={() => setRenaming(false)} />}
+    </>
   );
 }
 

@@ -71,15 +71,19 @@ export interface JobOutput {
   created_at: string;
 }
 
+export interface GCPObservation {
+  image: string;
+  pixel_x: number;
+  pixel_y: number;
+}
+
 export interface GCPPoint {
   id?: number;
   label: string;
   x: number;
   y: number;
   z: number;
-  pixel_x?: number;
-  pixel_y?: number;
-  image_name?: string;
+  observations: GCPObservation[];   // one entry per image
   // Phase 3: accuracy results
   error_x?: number;
   error_y?: number;
@@ -116,11 +120,44 @@ export interface ExifSummary {
 
 // ─── API calls ───────────────────────────────────────────────────────────────
 
+export interface AutoDetectResult {
+  gcp_label: string;
+  image_name: string;
+  pixel_x: number;
+  pixel_y: number;
+  confidence: number;
+  strategy: string;
+  candidates_scanned: number;
+  elapsed_s: number;
+  extra: Record<string, unknown>;
+}
+
+export type DetectionStrategy =
+  | 'triangle_cross'
+  | 'spray_paint'
+  | 'checkerboard'
+  | 'aruco'
+  | 'circle_grid'
+  | 'template'
+  | 'blob';
+
+export interface AutoDetectPayload {
+  strategy: DetectionStrategy;
+  gcps: Array<{ label: string; x: number; y: number; z: number; lat: number; lon: number }>;
+  radius_m?: number;
+  max_candidates?: number;
+  options?: Record<string, unknown>;
+}
+
 export const projectsApi = {
   list: () => api.get<Project[]>('/projects/').then(r => r.data),
   get: (id: string) => api.get<Project>(`/projects/${id}`).then(r => r.data),
   create: (data: FormData) => api.post<Project>('/projects/', data).then(r => r.data),
   delete: (id: string) => api.delete(`/projects/${id}`).then(r => r.data),
+  update: (id: string, data: { name?: string; description?: string }) =>
+    api.patch<Project>(`/projects/${id}`, data).then(r => r.data),
+  duplicate: (id: string) =>
+    api.post<Project>(`/projects/${id}/duplicate`).then(r => r.data),
   uploadImages: (id: string, files: FileList) => {
     const fd = new FormData();
     Array.from(files).forEach(f => fd.append('files', f));
@@ -130,12 +167,46 @@ export const projectsApi = {
         timeout: 300000,
       }).then(r => r.data);
   },
-  saveGCPs: (id: string, gcps: GCPPoint[]) =>
-    api.post(`/projects/${id}/gcps`, gcps).then(r => r.data),
+  saveGCPs: (id: string, gcps: GCPPoint[]) => {
+    // Expand each GCP into one flat row per observation (ODM format).
+    // GCPs with no observations send one row with no image.
+    const flat = gcps.flatMap(g =>
+      g.observations && g.observations.length > 0
+        ? g.observations.map(obs => ({
+            label: g.label, x: g.x, y: g.y, z: g.z,
+            image_name: obs.image,
+            pixel_x: obs.pixel_x,
+            pixel_y: obs.pixel_y,
+          }))
+        : [{ label: g.label, x: g.x, y: g.y, z: g.z }]
+    );
+    return api.post(`/projects/${id}/gcps`, flat).then(r => r.data);
+  },
   getGCPs: (id: string) =>
-    api.get<GCPPoint[]>(`/projects/${id}/gcps`).then(r => r.data),
+    api.get<any[]>(`/projects/${id}/gcps`).then(r => {
+      // Backend now returns pre-grouped data: one entry per GCP label
+      // with an 'observations' array. Map to GCPPoint shape.
+      return r.data.map((row: any): GCPPoint => ({
+        id: row.id,
+        label: row.label,
+        x: row.x,
+        y: row.y,
+        z: row.z,
+        observations: (row.observations ?? []).map((o: any) => ({
+          image: o.image,
+          pixel_x: o.pixel_x ?? 0,
+          pixel_y: o.pixel_y ?? 0,
+        })),
+        error_x: row.error_x,
+        error_y: row.error_y,
+        error_z: row.error_z,
+        error_total: row.error_total,
+      }));
+    }),
   updateRtkConfig: (id: string, config: { rtk_accuracy_h?: number; rtk_accuracy_v?: number; rtk_mode?: string }) =>
     api.patch<Project>(`/projects/${id}/rtk-config`, null, { params: config }).then(r => r.data),
+  autoDetectGCPs: (id: string, payload: AutoDetectPayload) =>
+    api.post<AutoDetectResult[]>(`/projects/${id}/gcps/auto-detect`, payload, { timeout: 300000 }).then(r => r.data),
 };
 
 export const jobsApi = {

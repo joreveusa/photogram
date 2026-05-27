@@ -20,32 +20,44 @@ PRESET_OPTIONS = {
         {"name": "orthophoto-resolution",  "value": 10},
         {"name": "fast-orthophoto",        "value": True},
         {"name": "skip-3dmodel",           "value": True},
+        {"name": "max-concurrency",        "value": 20},
     ],
     "survey_grade": [
         {"name": "pc-quality",             "value": "high"},
         {"name": "mesh-size",              "value": 300000},
         {"name": "orthophoto-resolution",  "value": 5},
         {"name": "use-3dmesh",             "value": True},
-        {"name": "pc-classify",            "value": True},
+        {"name": "max-concurrency",        "value": 20},
     ],
     "high_fidelity": [
         {"name": "pc-quality",             "value": "ultra"},
         {"name": "mesh-size",              "value": 600000},
         {"name": "orthophoto-resolution",  "value": 2},
         {"name": "use-3dmesh",             "value": True},
-        {"name": "pc-classify",            "value": True},
         {"name": "build-overviews",        "value": True},
+        {"name": "max-concurrency",        "value": 20},
+    ],
+    # Memory-safe variant: medium quality, conservative concurrency
+    "memory_safe": [
+        {"name": "pc-quality",             "value": "medium"},
+        {"name": "mesh-size",              "value": 200000},
+        {"name": "orthophoto-resolution",  "value": 5},
+        {"name": "fast-orthophoto",        "value": True},
+        {"name": "max-concurrency",        "value": 12},
+        {"name": "split",                  "value": 40},
+        {"name": "split-overlap",          "value": 20},
     ],
 }
 
 
 def _split_options(image_count: int) -> list:
-    if image_count <= 100:
+    # 64GB RAM can handle ~1500-2000 images without splitting
+    if image_count <= 1500:
         return []
-    split = 200 if image_count > 1000 else (150 if image_count > 500 else 250)
+    split = 1000 if image_count > 3000 else 800
     return [
         {"name": "split",         "value": split},
-        {"name": "split-overlap", "value": 50},
+        {"name": "split-overlap", "value": 20},
     ]
 
 
@@ -109,28 +121,41 @@ class NodeODMClient:
             # Attach all images
             total = len(image_paths)
             for idx, p in enumerate(image_paths):
+                ext = Path(p).suffix.lower()
+                mime = (
+                    "image/tiff" if ext in (".tif", ".tiff")
+                    else "image/png" if ext == ".png"
+                    else "image/jpeg"
+                )
                 fh = open(p, "rb")
                 handles.append(fh)
-                files.append(("images", (Path(p).name, fh, "image/jpeg")))
+                files.append(("images", (Path(p).name, fh, mime)))
                 if progress_callback and idx % 10 == 0:
                     progress_callback(idx, total)
 
-            # Attach options as JSON string field
-            files.append(("options", (None, json.dumps(options), "application/json")))
-
-            # Attach GCP if available
+            # GCP file: must be included in the 'images' field named 'gcp_list.txt'
+            # NodeODM auto-detects it by filename — a separate 'gcpFile' field
+            # is rejected as "Unexpected field" by NodeODM 2.2.4.
             if gcp_content:
-                files.append(("gcpFile", ("gcp_list.txt", gcp_content, "text/plain")))
+                files.append(("images", ("gcp_list.txt", gcp_content.encode(), "text/plain")))
 
+            # options MUST go in data= not files= — NodeODM 2.2.4 rejects
+            # it as "Unexpected field" if sent as a multipart file part.
             r = self._session.post(
                 f"{self.base_url}/task/new",
                 files=files,
+                data={"options": json.dumps(options)},
                 timeout=600,
             )
             r.raise_for_status()
             if progress_callback:
                 progress_callback(total, total)
-            return r.json()["uuid"]
+            data = r.json()
+            if "uuid" not in data:
+                # NodeODM returned an error body (often with HTTP 200)
+                err_msg = data.get("error") or data.get("message") or str(data)
+                raise RuntimeError(f"NodeODM rejected task: {err_msg}")
+            return data["uuid"]
 
         finally:
             for fh in handles:

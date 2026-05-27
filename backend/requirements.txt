@@ -13,3 +13,7 @@ psutil==5.9.8
 aiofiles==23.2.1
 gputil==1.4.0
 reportlab==4.2.0
+opencv-contrib-python==4.13.0.90
+loguru==0.7.2
+watchdog==4.0.1
+pyproj==3.6.1

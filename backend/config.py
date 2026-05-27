@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=False)  # Docker env vars take priority over .env file
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 NODEODM_URL = os.getenv("NODEODM_URL", "http://localhost:3000")

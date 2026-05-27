@@ -77,26 +77,5 @@ export class ErrorBoundary extends Component<Props, State> {
 
 /** Lightweight wrapper for a single page/section */
 export function PageErrorBoundary({ children }: { children: ReactNode }) {
-  return (
-    <ErrorBoundary
-      fallback={
-        <div className="page-content">
-          <div className="card" style={{ borderColor: 'rgba(239,68,68,0.3)', maxWidth: 480 }}>
-            <div className="flex items-center gap-3 mb-3">
-              <span style={{ fontSize: 28 }}>⚠️</span>
-              <h3 style={{ color: 'var(--error)' }}>Page failed to load</h3>
-            </div>
-            <p className="text-sm text-muted mb-3">
-              This section encountered an error. Try navigating back to the dashboard.
-            </p>
-            <button className="btn btn-secondary btn-sm" onClick={() => window.history.back()}>
-              ← Go Back
-            </button>
-          </div>
-        </div>
-      }
-    >
-      {children}
-    </ErrorBoundary>
-  );
+  return <ErrorBoundary>{children}</ErrorBoundary>;
 }

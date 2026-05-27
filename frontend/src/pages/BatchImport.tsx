@@ -284,6 +284,9 @@ export default function BatchImport() {
                   <label>Coordinate System</label>
                   <select className="select" value={coordSys} onChange={e => setCoordSys(e.target.value)}>
                     <option value="EPSG:4326">WGS84 (EPSG:4326)</option>
+                    <option value="EPSG:6529">NAD83(2011) / NM Central (EPSG:6529)</option>
+                    <option value="EPSG:6528">NAD83(2011) / NM East (EPSG:6528)</option>
+                    <option value="EPSG:6530">NAD83(2011) / NM West (EPSG:6530)</option>
                     <option value="EPSG:32654">WGS84 UTM Zone 54N</option>
                     <option value="EPSG:32610">WGS84 UTM Zone 10N</option>
                     <option value="EPSG:27700">British National Grid</option>

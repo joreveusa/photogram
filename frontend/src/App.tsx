@@ -33,7 +33,7 @@ function NodeODMStatus() {
       } catch { setOnline(false); }
     };
     check();
-    const timer = setInterval(check, 30000);
+    const timer = setInterval(check, 5000);
     return () => clearInterval(timer);
   }, []);
 
