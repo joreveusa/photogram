@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+
+# Environment
+.env
+*.env.local
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Outputs / processed data
+outputs/
+
+# Sample data — large imagery, don't commit
+sample_data/
+
+# Frontend build artifacts
+frontend/dist/
+frontend/node_modules/
+
+# Tauri build output
+frontend/src-tauri/target/
+
+# Test results (generated)
+test_results.jsonl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

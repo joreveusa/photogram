@@ -1,0 +1,78 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: photoforge_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nodeodm:
+    image: opendronemap/nodeodm:latest
+    container_name: photoforge_nodeodm
+    ports:
+      - "3000:3000"
+    volumes:
+      - nodeodm_data:/var/www/data
+    restart: unless-stopped
+    # Uncomment below if NVIDIA Container Toolkit is installed (GPU acceleration)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: photoforge_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - outputs_data:/outputs
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - NODEODM_URL=http://nodeodm:3000
+      - OUTPUT_DIR=/outputs
+      - DATABASE_URL=sqlite:////outputs/photoforge.db
+    depends_on:
+      redis:
+        condition: service_healthy
+      nodeodm:
+        condition: service_started
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: photoforge_worker
+    command: celery -A celery_app worker --loglevel=info --concurrency=1
+    volumes:
+      - ./backend:/app
+      - outputs_data:/outputs
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - NODEODM_URL=http://nodeodm:3000
+      - OUTPUT_DIR=/outputs
+      - DATABASE_URL=sqlite:////outputs/photoforge.db
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  nodeodm_data:
+  outputs_data:

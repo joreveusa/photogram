@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Point Cloud Viewer — PhotoForge</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #070a12; font-family: 'Inter', sans-serif; }
+
+    #potree_render_area { position: absolute; inset: 0; }
+
+    /* ── Toolbar ── */
+    #toolbar {
+      position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 6px; z-index: 100;
+      background: rgba(10,14,26,0.88); backdrop-filter: blur(14px);
+      border: 1px solid rgba(255,255,255,0.08); border-radius: 12px;
+      padding: 8px 14px; flex-wrap: wrap; max-width: calc(100vw - 40px); justify-content: center;
+    }
+    .tool-sep { width: 1px; background: rgba(255,255,255,0.1); margin: 0 4px; }
+    .tool-btn {
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+      color: #b0bec5; border-radius: 7px; padding: 5px 13px;
+      font-size: 11px; cursor: pointer; transition: all 0.15s; white-space: nowrap;
+      font-family: inherit; letter-spacing: 0.01em;
+    }
+    .tool-btn:hover { background: rgba(0,212,170,0.15); border-color: #00d4aa; color: #00d4aa; }
+    .tool-btn.active { background: rgba(0,212,170,0.22); border-color: #00d4aa; color: #00d4aa; font-weight: 600; }
+    .tool-btn.danger { background: rgba(239,68,68,0.15); border-color: #ef4444; color: #ef4444; }
+    .tool-btn.danger:hover { background: rgba(239,68,68,0.25); }
+
+    /* ── Info bar ── */
+    #info-bar {
+      position: absolute; bottom: 12px; left: 12px; z-index: 100;
+      background: rgba(10,14,26,0.88); backdrop-filter: blur(14px);
+      border: 1px solid rgba(255,255,255,0.08); border-radius: 9px;
+      padding: 8px 16px; font-size: 11px; color: #607d8b;
+      pointer-events: none; display: flex; gap: 14px; align-items: center;
+    }
+    .info-pill { display: flex; gap: 6px; align-items: center; }
+    #point-count { color: #00d4aa; font-weight: 700; }
+
+    /* ── Clip box panel ── */
+    #clip-panel {
+      position: absolute; top: 64px; right: 12px; z-index: 100;
+      background: rgba(10,14,26,0.88); backdrop-filter: blur(14px);
+      border: 1px solid rgba(255,255,255,0.08); border-radius: 9px;
+      padding: 10px 14px; font-size: 11px; color: #607d8b;
+      display: none; flex-direction: column; gap: 8px; min-width: 180px;
+    }
+    #clip-panel h4 { color: #b0bec5; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
+    .clip-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .clip-row label { color: #607d8b; font-size: 11px; }
+    .clip-row input[type=range] { flex: 1; accent-color: #00d4aa; }
+
+    /* ── Loading ── */
+    #loading-overlay {
+      position: absolute; inset: 0; z-index: 200;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: #070a12; transition: opacity 0.5s;
+    }
+    #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+    .loader-ring {
+      width: 52px; height: 52px; border-radius: 50%;
+      border: 3px solid rgba(0,212,170,0.15);
+      border-top-color: #00d4aa;
+      animation: spin 0.8s linear infinite;
+    }
+    .loader-text { margin-top: 16px; color: #607d8b; font-size: 13px; }
+    .loader-sub  { margin-top:  6px; color: #37474f; font-size: 11px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Error ── */
+    #error-overlay {
+      display: none; position: absolute; inset: 0; z-index: 300;
+      flex-direction: column; align-items: center; justify-content: center;
+      background: #070a12; color: #ef4444; text-align: center; padding: 32px;
+    }
+    #error-overlay.visible { display: flex; }
+    #error-overlay h3 { margin-bottom: 8px; font-size: 18px; }
+    #error-overlay p { font-size: 13px; color: #607d8b; max-width: 400px; }
+    #error-overlay .retry-btn {
+      margin-top: 20px; background: rgba(239,68,68,0.15); border: 1px solid #ef4444;
+      color: #ef4444; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 13px;
+    }
+  </style>
+  <!-- Potree from CDN -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/potree/potree@1.8/build/potree/potree.css">
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/jquery/jquery-3.1.1.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/spectrum/spectrum.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/jstree/jstree.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/three.js/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/other/BinaryHeap.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/tween/tween.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/d3/d3.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/proj4/proj4.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/openlayers3/ol.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/other/Potree.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/libs/plasio/js/laslaz.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/potree/potree@1.8/build/potree/potree.js"></script>
+</head>
+<body>
+  <div id="potree_render_area"></div>
+
+  <div id="toolbar">
+    <!-- Navigation -->
+    <button class="tool-btn active" id="btn-orbit" onclick="setNavMode('orbit')">🔄 Orbit</button>
+    <button class="tool-btn" id="btn-fly"   onclick="setNavMode('fly')">✈️ Fly</button>
+    <button class="tool-btn" id="btn-top"   onclick="topView()">⬆ Top</button>
+    <button class="tool-btn" id="btn-reset" onclick="resetCamera()">⌂ Reset</button>
+
+    <div class="tool-sep"></div>
+
+    <!-- Color mode -->
+    <button class="tool-btn active" id="btn-rgb"       onclick="setColorMode('rgb')">🎨 RGB</button>
+    <button class="tool-btn" id="btn-height"           onclick="setColorMode('height')">📏 Height</button>
+    <button class="tool-btn" id="btn-intensity"        onclick="setColorMode('intensity')">💡 Intensity</button>
+
+    <div class="tool-sep"></div>
+
+    <!-- Tools -->
+    <button class="tool-btn" id="btn-measure"   onclick="toggleMeasure()">📐 Measure</button>
+    <button class="tool-btn" id="btn-profile"   onclick="toggleProfile()">📊 Profile</button>
+    <button class="tool-btn danger" id="btn-clear-measure" onclick="clearMeasurements()" style="display:none">✕ Clear</button>
+
+    <div class="tool-sep"></div>
+
+    <!-- Point size -->
+    <button class="tool-btn" id="btn-pts-sm"  onclick="setPointSize(0.8)">· Sm</button>
+    <button class="tool-btn active" id="btn-pts-md" onclick="setPointSize(1.5)">· Md</button>
+    <button class="tool-btn" id="btn-pts-lg"  onclick="setPointSize(2.5)">· Lg</button>
+  </div>
+
+  <div id="info-bar">
+    <div class="info-pill">☁️ Points: <span id="point-count">—</span></div>
+    <div class="info-pill" style="color: #37474f">|</div>
+    <div class="info-pill" id="measure-display" style="display:none; color: #00d4aa"></div>
+    <div class="info-pill" style="color: #37474f">🖱 Drag: Orbit · Right: Pan · Scroll: Zoom</div>
+  </div>
+
+  <div id="loading-overlay">
+    <div class="loader-ring"></div>
+    <div class="loader-text">Loading point cloud…</div>
+    <div class="loader-sub" id="load-sub">Connecting to EPT stream</div>
+  </div>
+
+  <div id="error-overlay">
+    <h3>⚠️ Could not load point cloud</h3>
+    <p id="error-msg">The EPT data could not be found. The point cloud may still be processing.</p>
+    <button class="retry-btn" onclick="location.reload()">↻ Retry</button>
+  </div>
+
+  <script>
+    let viewer, pointCloud;
+    let measureTool = null;
+    let activeMeasurement = false;
+    let activeProfile    = false;
+
+    const params     = new URLSearchParams(window.location.search);
+    const eptUrl     = params.get('ept');
+    const budgetParam = parseInt(params.get('budget') || '2000000', 10);
+
+    if (!eptUrl) {
+      showError('No EPT URL provided. Pass ?ept=<url> to load a point cloud.');
+    } else {
+      document.getElementById('load-sub').textContent = 'Fetching: ' + eptUrl;
+      initViewer();
+    }
+
+    function initViewer() {
+      viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
+      viewer.setEDLEnabled(true);
+      viewer.setFOV(60);
+      viewer.setPointBudget(isNaN(budgetParam) ? 2_000_000 : budgetParam);
+      viewer.setBackground('gradient');
+      viewer.loadSettingsFromURL();
+
+      // Override background to match dark theme
+      viewer.setBackground('black');
+
+      Potree.loadPointCloud(eptUrl, 'Point Cloud', e => {
+        if (e.type === 'error') {
+          showError('Failed to load EPT point cloud: ' + (e.message || 'unknown error'));
+          return;
+        }
+        pointCloud = e.pointcloud;
+        const material = pointCloud.material;
+        material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+        material.size = 1.5;
+
+        viewer.scene.addPointCloud(pointCloud);
+        viewer.fitToScreen();
+
+        const cnt = pointCloud.numPoints;
+        document.getElementById('point-count').textContent =
+          cnt ? (cnt >= 1e6 ? (cnt/1e6).toFixed(1) + 'M' : cnt.toLocaleString()) : '—';
+
+        hideLoading();
+      });
+    }
+
+    // ── Loading / Error ──────────────────────────────────────────────────────
+
+    function hideLoading() {
+      const ov = document.getElementById('loading-overlay');
+      ov.classList.add('hidden');
+      setTimeout(() => ov.remove(), 600);
+    }
+
+    function showError(msg) {
+      document.getElementById('loading-overlay').style.display = 'none';
+      const ov = document.getElementById('error-overlay');
+      document.getElementById('error-msg').textContent = msg;
+      ov.classList.add('visible');
+    }
+
+    // ── Navigation ────────────────────────────────────────────────────────────
+
+    function setNavMode(mode) {
+      if (!viewer) return;
+      ['btn-orbit','btn-fly'].forEach(id => document.getElementById(id).classList.remove('active'));
+      if (mode === 'orbit') {
+        viewer.setNavigationMode(Potree.OrbitControls);
+        document.getElementById('btn-orbit').classList.add('active');
+      } else {
+        viewer.setNavigationMode(Potree.FlyControls);
+        document.getElementById('btn-fly').classList.add('active');
+      }
+    }
+
+    function topView() {
+      if (!viewer) return;
+      const box = viewer.scene.getBoundingBox();
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const h = Math.max(size.x, size.y) * 1.6;
+      viewer.scene.view.position.set(center.x, center.y + h, center.z);
+      viewer.scene.view.lookAt(center);
+    }
+
+    function resetCamera() {
+      if (!viewer) return;
+      viewer.fitToScreen();
+    }
+
+    // ── Color mode ────────────────────────────────────────────────────────────
+
+    function setColorMode(mode) {
+      if (!pointCloud) return;
+      ['btn-rgb','btn-height','btn-intensity'].forEach(id => document.getElementById(id).classList.remove('active'));
+      const modes = { rgb: 'rgba', height: 'elevation', intensity: 'intensity' };
+      pointCloud.material.activeAttributeName = modes[mode] || 'rgba';
+      document.getElementById('btn-' + mode).classList.add('active');
+    }
+
+    // ── Point size ────────────────────────────────────────────────────────────
+
+    function setPointSize(sz) {
+      if (!pointCloud) return;
+      ['btn-pts-sm','btn-pts-md','btn-pts-lg'].forEach(id => document.getElementById(id).classList.remove('active'));
+      pointCloud.material.size = sz;
+      const id = sz <= 1 ? 'btn-pts-sm' : sz <= 2 ? 'btn-pts-md' : 'btn-pts-lg';
+      document.getElementById(id).classList.add('active');
+    }
+
+    // ── Measurements ─────────────────────────────────────────────────────────
+
+    function toggleMeasure() {
+      if (!viewer) return;
+      activeProfile = false;
+      activeMeasurement = !activeMeasurement;
+      document.getElementById('btn-measure').classList.toggle('active', activeMeasurement);
+      document.getElementById('btn-profile').classList.remove('active');
+
+      if (activeMeasurement) {
+        const m = new Potree.Measure();
+        m.showDistances = true;
+        m.showArea = false;
+        m.closed = false;
+        viewer.scene.addMeasurement(m);
+        viewer.measuringTool.startInsertion(m);
+        document.getElementById('btn-clear-measure').style.display = '';
+      } else {
+        viewer.measuringTool.stopInsertion();
+      }
+    }
+
+    function toggleProfile() {
+      if (!viewer) return;
+      activeMeasurement = false;
+      activeProfile = !activeProfile;
+      document.getElementById('btn-profile').classList.toggle('active', activeProfile);
+      document.getElementById('btn-measure').classList.remove('active');
+      if (activeProfile) {
+        document.getElementById('btn-clear-measure').style.display = '';
+      }
+    }
+
+    function clearMeasurements() {
+      if (!viewer) return;
+      viewer.scene.measurements.forEach(m => viewer.scene.removeMeasurement(m));
+      activeMeasurement = false;
+      activeProfile = false;
+      document.getElementById('btn-measure').classList.remove('active');
+      document.getElementById('btn-profile').classList.remove('active');
+      document.getElementById('btn-clear-measure').style.display = 'none';
+      document.getElementById('measure-display').style.display = 'none';
+    }
+  </script>
+</body>
+</html>

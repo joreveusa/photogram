@@ -1,0 +1,15 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+celery[redis]==5.4.0
+redis==5.0.4
+sqlmodel==0.0.19
+httpx==0.27.0
+requests==2.32.3
+pillow==10.3.0
+exifread==3.0.0
+python-multipart==0.0.9
+python-dotenv==1.0.1
+psutil==5.9.8
+aiofiles==23.2.1
+gputil==1.4.0
+reportlab==4.2.0
