@@ -26,6 +26,9 @@ outputs/
 # Sample data — large imagery, don't commit
 sample_data/
 
+# Potree point cloud data (large binary assets, not for git)
+frontend/public/potree/Potree_1.8/pointclouds/
+
 # Frontend build artifacts
 frontend/dist/
 frontend/node_modules/
